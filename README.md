@@ -1,5 +1,8 @@
 # How to write simple socket.io load test with K6
 
+- Note:
+  - Only support transport websocket for now
+
 Currently at the time i wrote this (Jul 2023), K6 only has support for normal websocket connection.
 So this is how it can be done using only k6/ws native library.
 

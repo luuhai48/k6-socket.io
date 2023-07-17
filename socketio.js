@@ -11,8 +11,6 @@ export const CommunicationType = Object.freeze({
   PING: "2",
   PONG: "3",
   MESSAGE: "4",
-  UPGRADE: "5",
-  NOOP: "6",
 });
 
 export const ActionType = Object.freeze({
@@ -21,8 +19,6 @@ export const ActionType = Object.freeze({
   EVENT: "2",
   ACK: "3",
   ERROR: "4",
-  BINARY_EVENT: "5",
-  BINARY_ACK: "6",
 });
 
 export default class Client {
@@ -33,7 +29,7 @@ export default class Client {
     let parsedUri;
     try {
       parsedUri = new URL(uri);
-    } catch {
+    } catch (_) {
       return fail("Invalid URI");
     }
 
@@ -46,12 +42,14 @@ export default class Client {
     }
 
     this.uri = `${["https:", "wss:"].includes(parsedUri.prototol) ? "wss" : "ws"
-      }://${parsedUri.host}/${parsedUri.pathname
+      }://${parsedUri.host}${parsedUri.pathname
         .replace(/socket.io$/, "")
-        .replace(/socket.io\/$/, "")}/socket.io/?${query.toString()}`;
+        .replace(/socket.io\/$/, "")
+        .replace(/\/$/, "")}/socket.io/?${query.toString()}`;
 
     this.numberAckMsgs = 0;
     this.ackHandlers = {};
+    this.eventListeners = {};
   }
 
   /**
@@ -61,7 +59,7 @@ export default class Client {
     if (this.connected) {
       return;
     }
-    this.onwsopen = handler;
+    this._onwsopen = handler;
   }
 
   /**
@@ -71,7 +69,7 @@ export default class Client {
     if (this.connected) {
       return;
     }
-    this.onwsclose = handler;
+    this._onwsclose = handler;
   }
 
   /**
@@ -81,17 +79,17 @@ export default class Client {
     if (this.connected) {
       return;
     }
-    this.onwserror = handler;
+    this._onwserror = handler;
   }
 
   /**
-   * Listen when socket.io connection established
+   * Listen socket.io event
    */
-  onconnect(handler) {
+  on(event, handler) {
     if (this.connected) {
       return;
     }
-    this.onconnect = handler;
+    this.eventListeners[event] = handler;
   }
 
   /**
@@ -109,22 +107,22 @@ export default class Client {
    * @returns {import("k6/ws").Response}
    */
   connect() {
-    return ws.connect(this.uri, (socket) => {
+    ws.connect(this.uri, (socket) => {
       this.connected = true;
       this.socket = socket;
 
-      if (this.onwsopen) {
+      if (this._onwsopen) {
         socket.on("open", this.onwsopen);
       }
-      if (this.onwsclose) {
+      if (this._onwsclose) {
         socket.on("close", this.onwsclose);
       }
-      if (this.onwserror) {
+      if (this._onwserror) {
         socket.on("error", this.onwserror);
       }
 
-      if (this.timeoutMs !== undefined) {
-        setTimeout(() => {
+      if (this.timeoutSeconds !== undefined) {
+        socket.setTimeout(() => {
           this.close();
           fail(this.timeoutSeconds + " seconds passed. Closing the socket");
         }, this.timeoutSeconds * 1000);
@@ -136,7 +134,7 @@ export default class Client {
         let parsedData;
         try {
           parsedData = JSON.parse(data);
-        } catch { }
+        } catch (__) { }
 
         if (code[0]) {
           switch (code[0]) {
@@ -157,15 +155,26 @@ export default class Client {
                 case ActionType.CONNECT: {
                   // After sending code "40" to server, we receive response with unique sid
                   this.sid = parsedData.sid;
-                  if (this.onconnect) {
-                    this.onconnect();
+                  if (this.eventListeners["connect"]) {
+                    this.eventListeners["connect"](parsedData || data);
                   }
                   break;
                 }
 
                 case ActionType.DISCONNECT: {
                   // Connection closed by server
+                  if (this.eventListeners["disconnect"]) {
+                    this.eventListeners["disconnect"]();
+                  }
                   this.close();
+                  break;
+                }
+
+                case ActionType.EVENT: {
+                  // Reveice event from server
+                  if (this.eventListeners[parsedData[0]]) {
+                    this.eventListeners[parsedData[0]](parsedData[1]);
+                  }
                   break;
                 }
 
@@ -180,18 +189,30 @@ export default class Client {
                   break;
                 }
 
+                case ActionType.ERROR: {
+                  if (this.eventListeners["error"]) {
+                    this.eventListeners["error"](data);
+                  }
+                  this.close();
+                  fail("error: " + data);
+                }
+
                 default:
-                  break;
+                  this.close();
+                  fail("Unknown action type: " + code[1]);
               }
               break;
             }
 
             default:
-              break;
+              this.close();
+              fail("Unknown communication type: " + code[0]);
           }
         }
       });
     });
+
+    return this;
   }
 
   /**
@@ -225,5 +246,6 @@ export default class Client {
     this.socket = undefined;
     this.numberAckMsgs = 0;
     this.ackHandlers = {};
+    this.eventListeners = {};
   }
 }
