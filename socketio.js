@@ -1,5 +1,5 @@
 import ws from "k6/ws";
-import { fail } from "k6";
+import { fail, sleep } from "k6";
 import { Counter } from "k6/metrics";
 import { URL } from "https://jslib.k6.io/url/1.0.0/index.js";
 
@@ -20,6 +20,8 @@ export const ActionType = Object.freeze({
   ACK: "3",
   ERROR: "4",
 });
+
+const EVENT_LOOP_CYCLE_MS = 10;
 
 export default class Client {
   /**
@@ -50,6 +52,7 @@ export default class Client {
     this.numberAckMsgs = 0;
     this.ackHandlers = {};
     this.eventListeners = {};
+    this.events = [];
   }
 
   /**
@@ -109,7 +112,7 @@ export default class Client {
   connect() {
     ws.connect(this.uri, (socket) => {
       this.connected = true;
-      this.socket = socket;
+      this._socket = socket;
 
       if (this._onwsopen) {
         socket.on("open", this.onwsopen);
@@ -123,7 +126,7 @@ export default class Client {
 
       if (this.timeoutSeconds !== undefined) {
         socket.setTimeout(() => {
-          this.close();
+          this.close(true);
           fail(this.timeoutSeconds + " seconds passed. Closing the socket");
         }, this.timeoutSeconds * 1000);
       }
@@ -166,7 +169,7 @@ export default class Client {
                   if (this.eventListeners["disconnect"]) {
                     this.eventListeners["disconnect"]();
                   }
-                  this.close();
+                  this.close(true);
                   break;
                 }
 
@@ -193,23 +196,52 @@ export default class Client {
                   if (this.eventListeners["error"]) {
                     this.eventListeners["error"](data);
                   }
-                  this.close();
+                  this.close(true);
                   fail("error: " + data);
                 }
 
                 default:
-                  this.close();
+                  this.close(true);
                   fail("Unknown action type: " + code[1]);
               }
               break;
             }
 
             default:
-              this.close();
+              this.close(true);
               fail("Unknown communication type: " + code[0]);
           }
         }
       });
+
+      socket.setInterval(() => {
+        if (!this.events || !this.events.length) return;
+
+        const event = this.events[0];
+        if (typeof event === "function") {
+          event();
+          this.events.shift();
+          return;
+        }
+
+        if (typeof event === "object") {
+          if (event.sleep) {
+            event.sleep -= EVENT_LOOP_CYCLE_MS / 1000;
+            if (event.sleep <= 0) {
+              this.events.shift();
+            } else {
+              this.events[0] = event;
+            }
+            sleep(EVENT_LOOP_CYCLE_MS / 1000);
+            return;
+          }
+
+          if (event.close) {
+            this.close(true);
+            return;
+          }
+        }
+      }, EVENT_LOOP_CYCLE_MS);
     });
 
     return this;
@@ -221,29 +253,36 @@ export default class Client {
    * @param {Function} ack
    */
   emit(channel, data, ack) {
-    if (!this.connected) {
-      return;
-    }
+    this.events.push(() => {
+      this._socket.send(
+        `${CommunicationType.MESSAGE}${ActionType.EVENT}${ack ? this.numberAckMsgs : ""
+        }${JSON.stringify([channel, data])}`
+      );
+      msgsSent.add(1);
 
-    this.socket.send(
-      `${CommunicationType.MESSAGE}${ActionType.EVENT}${ack ? this.numberAckMsgs : ""
-      }${JSON.stringify([channel, data])}`
-    );
-    msgsSent.add(1);
-
-    if (ack) {
-      this.numberAckMsgs += 1;
-      this.ackHandlers[this.numberAckMsgs] = ack;
-    }
+      if (ack) {
+        this.numberAckMsgs += 1;
+        this.ackHandlers[this.numberAckMsgs] = ack;
+      }
+    });
   }
 
-  close() {
+  sleep(ms) {
+    this.events.push({ sleep: ms });
+  }
+
+  close(force = false) {
+    if (!force) {
+      this.events.push({ close: true });
+      return;
+    }
+
     if (!this.connected) {
       return;
     }
-    this.socket.close();
+    this._socket.close();
     this.connected = false;
-    this.socket = undefined;
+    this._socket = undefined;
     this.numberAckMsgs = 0;
     this.ackHandlers = {};
     this.eventListeners = {};

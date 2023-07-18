@@ -1,5 +1,7 @@
 import http from "k6/http";
-import { check, fail, sleep } from "k6";
+import { check, fail } from "k6";
+import { randomIntBetween } from "https://jslib.k6.io/k6-utils/1.4.0/index.js";
+
 import Client from "./socketio.js";
 
 const GET_OTP_URL = "http://localhost:4000/api/v2/otp";
@@ -26,7 +28,11 @@ export default function() {
     })
   ) {
     const json = getOtpRequest.json();
+
+    // Pass custom parameters to the uri
     const client = new Client(`${SOCKETIO_URL}/?otp=${json.otp}`);
+
+    // Force disconnect client after 60 seconds
     client.setTimeout(60);
 
     client.on("error", (err) => {
@@ -40,18 +46,28 @@ export default function() {
     client.on("connect", (data) => {
       console.log("Connected:" + JSON.stringify(data));
 
-      sleep(1);
+      client.emit("hello", {
+        data: "abc 1",
+      });
+      client.emit("hello", {
+        data: "abc 2",
+      });
+
+      // Use client.sleep instead of normal sleep, or event loop will be blocked
+      client.sleep(randomIntBetween(1, 3));
 
       client.emit("hello", {
-        data: "abc",
+        data: "abc 3",
       });
-      sleep(3);
+
+      client.sleep(randomIntBetween(1, 3));
+
       client.emit("hello", {
-        data: "abc",
+        data: "abc 4",
       });
-      client.emit("hello", {
-        data: "abc",
-      });
+
+      client.sleep(randomIntBetween(1, 3));
+      client.close();
     });
 
     client.connect();
